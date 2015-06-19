@@ -1,4 +1,5 @@
 from twisted.internet import reactor, protocol
+from twisted.internet.task import LoopingCall
 import time
 import struct
 import os
@@ -6,13 +7,15 @@ import sys
 import random
 from Crypto.Cipher import AES
 import hashlib
-
+import zlib
 latestseq = 0
 txseq = 0
 tun = None
 CMD_PUSH_DATA = 0x00
 CMD_PUSH_WEIGHT = 0x01
 CMD_AUTH_PEER = 0x02
+CMD_PING = 0x03
+CMD_PONG = 0x04
 connections = []
 password = "123456789"
 sendqueue = []
@@ -29,17 +32,51 @@ class PoorMansBondingProtocol(protocol.Protocol):
         self.auth = False
         self.incomingcipher = AES.new(hashlib.sha256(password).digest(), AES.MODE_CBC, hashlib.sha256(password).digest()[:16])
         self.outgoingcipher = AES.new(hashlib.sha256(password).digest(), AES.MODE_CBC, hashlib.sha256(password).digest()[:16])
-
+        self.pingcall = LoopingCall(self.ping)
+        self.timeoutcheck_call = LoopingCall(self.timeoutcheck)
+        self.lastpong = time.time()
+        
+    def timeoutcheck(self):
+        if time.time() - self.lastpong > 10.0:
+            print("Ping timeout on %s"%(str(self.transport)))
+            self.transport.loseConnection()
+            
+    def ping(self):
+        self.sendPacket(CMD_PING,"@"*16)
     def connectionMade(self):
         self.sendPacket(CMD_AUTH_PEER, password)
+        self.pingcall.start(5.0)
+        self.timeoutcheck_call.start(1.0)
+        self.transport.setTcpKeepAlive(True)
     def connectionLost(self, reason):
+        self.timeoutcheck_call.stop()
+        self.pingcall.stop()
+        for x in list(sendqueue):
+            if x[2] == self:
+                sendqueue.remove(x)
+        if len(sendqueue) > 0:
+            self.lastsentseq = 2**31
+            for x in list(sendqueue):
+                if x[0] < self.lastsentseq:
+                    self.lastsentseq = x[0]
+            self.lastsentseq -= 1
+        
         if self in connections:
             connections.remove(self)
     def sendPacket(self, cmd, data):
         global txseq
-        datapadded = data+"\x00"*(16-(len(data)%16))
+        comp = True
+        datac = zlib.compress(data)
+        if len(datac) >= len(data):
+            datac = data #Not worth it
+            comp = False
+        
+        datapadded = datac+"\x00"*(16-(len(datac)%16))
         #CMD,PADDING,LEN,SEQ
-        self.transport.write(struct.pack(">BBHI",int(cmd),16-len(data)%16,len(datapadded),txseq)+self.outgoingcipher.encrypt(datapadded))
+        pad = 16-len(datac)%16
+        if comp:
+            pad |= 0x80
+        self.transport.write(struct.pack(">BBHI",int(cmd),pad,len(datapadded),txseq)+self.outgoingcipher.encrypt(datapadded))
         txseq += 1
     def printStatus(self):
         pass
@@ -69,11 +106,15 @@ class PoorMansBondingProtocol(protocol.Protocol):
             #print (cmd,plen,seq)
             
             decdata = self.incomingcipher.decrypt(self.rxbuffer[8:8+plen])
-            decdata = decdata[:len(decdata)-pad]
+            decdata = decdata[:len(decdata)-(pad&0x7f)]
+            
+            if pad & 0x80:
+                decdata = zlib.decompress(decdata)
             
             if self.auth:
                 if cmd == CMD_PUSH_DATA:
-                    sendqueue.append((seq,decdata))
+                    sendqueue.append((seq,decdata,self))
+                    #print(sendqueue)
                     #os.write(tun.fileno(), decdata)
                     while True:
                         sent = False
@@ -87,17 +128,23 @@ class PoorMansBondingProtocol(protocol.Protocol):
                         if not sent:
                             break
                 if cmd == CMD_PUSH_WEIGHT:
-                    sendqueue.append((seq,""))
+                    sendqueue.append((seq,"",self))
                     self.localweight = struct.unpack(">I",decdata)[0]
                     print("%s : Weight: Local=%d Remote=%d\n"%(str(self.transport),self.remoteweight,self.localweight))
                     #print("%s: New weight rcvd: %d,%d"%(str(self),self.remoteweight,self.localweight))
             if cmd == CMD_AUTH_PEER:
-                sendqueue.append((seq,""))
+                sendqueue.append((seq,"",self))
                 if decdata == password:
                     self.auth = True
                     connections.append(self)
                 else:
                     print("Invalid password: "+password)
+            if cmd == CMD_PING:
+                sendqueue.append((seq,"",self))
+                self.sendPacket(CMD_PONG,decdata)
+            if cmd == CMD_PONG:
+                sendqueue.append((seq,"",self))
+                self.lastpong = time.time()
             self.rxbuffer = self.rxbuffer[8+plen:]
             if time.time()-self.lastwtime > 2.0:
                 self.sendPacket(CMD_PUSH_WEIGHT, struct.pack(">I",self.remoteweight))

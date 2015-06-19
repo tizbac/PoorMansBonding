@@ -29,8 +29,16 @@ fcntl.ioctl(PoorMansBondingProtocol.tun , TUNSETIFF, ifr)
 
 subprocess.check_call("ifconfig %s 192.168.10.2 pointopoint 192.168.10.1 up"%(sys.argv[1]),shell=True)
 
-factory = protocol.ClientFactory()
-factory.protocol = PoorMansBondingProtocol.PoorMansBondingProtocol
+class PoorMansBondingClientFactory(protocol.ReconnectingClientFactory):
+    protocol = PoorMansBondingProtocol.PoorMansBondingProtocol
+    maxDelay = 10
+    def clientConnectionFailed(self, connector, reason):
+        print("Connect %s failed: %s"%(str(connector),str(reason)))
+        self.retry(connector=connector)
+    def clientConnectionLost(self, connector, unused_reason):
+        print("Connect %s lost: %s"%(str(connector),str(unused_reason)))
+        self.retry(connector=connector)
+factory = PoorMansBondingClientFactory()
 
 for x in sys.argv[3:]:
     hostport = x.split(":")
