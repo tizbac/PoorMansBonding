@@ -51,15 +51,15 @@ class PoorMansBondingProtocol(protocol.Protocol):
     def connectionLost(self, reason):
         self.timeoutcheck_call.stop()
         self.pingcall.stop()
-        for x in list(sendqueue):
-            if x[2] == self:
-                sendqueue.remove(x)
-        if len(sendqueue) > 0:
-            self.lastsentseq = 2**31
-            for x in list(sendqueue):
-                if x[0] < self.lastsentseq:
-                    self.lastsentseq = x[0]
-            self.lastsentseq -= 1
+        #for x in list(sendqueue):
+            #if x[2] == self:
+                #sendqueue.remove(x)
+        #if len(sendqueue) > 0:
+            #self.lastsentseq = 2**31
+            #for x in list(sendqueue):
+                #if x[0] < self.lastsentseq:
+                    #self.lastsentseq = x[0]
+            #self.lastsentseq -= 1
         
         if self in connections:
             connections.remove(self)
@@ -113,37 +113,37 @@ class PoorMansBondingProtocol(protocol.Protocol):
             
             if self.auth:
                 if cmd == CMD_PUSH_DATA:
-                    sendqueue.append((seq,decdata,self))
+                    #sendqueue.append((seq,decdata,self))
                     #print(sendqueue)
-                    #os.write(tun.fileno(), decdata)
-                    while True:
-                        sent = False
-                        for x in list(sendqueue):
-                            if x[0] == lastsentseq+1:
-                                if len(x[1]) > 0:
-                                    os.write(tun.fileno(), x[1])
-                                lastsentseq = x[0]
-                                sendqueue.remove(x)
-                                sent = True
-                        if not sent:
-                            break
+                    os.write(tun.fileno(), decdata)
+                    #while True:
+                        #sent = False
+                        #for x in list(sendqueue):
+                            #if x[0] == lastsentseq+1:
+                                #if len(x[1]) > 0:
+                                    #os.write(tun.fileno(), x[1])
+                                #lastsentseq = x[0]
+                                #sendqueue.remove(x)
+                                #sent = True
+                        #if not sent:
+                            #break
                 if cmd == CMD_PUSH_WEIGHT:
-                    sendqueue.append((seq,"",self))
+                    #sendqueue.append((seq,"",self))
                     self.localweight = struct.unpack(">I",decdata)[0]
                     print("%s : Weight: Local=%d Remote=%d\n"%(str(self.transport),self.remoteweight,self.localweight))
                     #print("%s: New weight rcvd: %d,%d"%(str(self),self.remoteweight,self.localweight))
             if cmd == CMD_AUTH_PEER:
-                sendqueue.append((seq,"",self))
+                #sendqueue.append((seq,"",self))
                 if decdata == password:
                     self.auth = True
                     connections.append(self)
                 else:
                     print("Invalid password: "+password)
             if cmd == CMD_PING:
-                sendqueue.append((seq,"",self))
+                #sendqueue.append((seq,"",self))
                 self.sendPacket(CMD_PONG,decdata)
             if cmd == CMD_PONG:
-                sendqueue.append((seq,"",self))
+                #sendqueue.append((seq,"",self))
                 self.lastpong = time.time()
             self.rxbuffer = self.rxbuffer[8+plen:]
             if time.time()-self.lastwtime > 2.0:
