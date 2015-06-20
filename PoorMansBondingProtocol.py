@@ -35,6 +35,7 @@ CMD_PUSH_WEIGHT = 0x01
 CMD_AUTH_PEER = 0x02
 CMD_PING = 0x03
 CMD_PONG = 0x04
+CMD_AUTH_CHALLENGE = 0x05
 connections = []
 password = "123456789"
 sendqueue = []
@@ -47,14 +48,17 @@ class PoorMansBondingProtocol(protocol.Protocol):
         self.txseq = 0
         self.rxbytes = 0
         self.txbytes = 0
-        self.lastwtime = time.time() # Last time weight was sent to remote peer
+        self.lastwtime = time.time() # Last time weight was sent to remote peer and updated
         self.auth = False
         self.incomingcipher = AES.new(hashlib.sha256(password).digest(), AES.MODE_CBC, hashlib.sha256(password).digest()[:16])
         self.outgoingcipher = AES.new(hashlib.sha256(password).digest(), AES.MODE_CBC, hashlib.sha256(password).digest()[:16])
         self.pingcall = LoopingCall(self.ping)
         self.timeoutcheck_call = LoopingCall(self.timeoutcheck)
         self.lastpong = time.time()
+        self.challenge = "".join([ chr(ord("a")+random.randint(0,25)) for i in range(0,16) ])
         
+        self.wsum = 0
+        self.wcount = 0
     def timeoutcheck(self):
         if time.time() - self.lastpong > 10.0:
             print("Ping timeout on %s"%(str(self.transport)))
@@ -63,10 +67,14 @@ class PoorMansBondingProtocol(protocol.Protocol):
     def ping(self):
         self.sendPacket(CMD_PING,"@"*16)
     def connectionMade(self):
-        self.sendPacket(CMD_AUTH_PEER, password)
+        self.sendPacket(CMD_AUTH_CHALLENGE, self.challenge)
+        print("%s: Sent auth challenge"%(str(self.transport)))
         self.pingcall.start(5.0)
         self.timeoutcheck_call.start(1.0)
         self.transport.setTcpKeepAlive(True)
+        
+        
+        
     def connectionLost(self, reason):
         self.timeoutcheck_call.stop()
         self.pingcall.stop()
@@ -111,16 +119,8 @@ class PoorMansBondingProtocol(protocol.Protocol):
         #print(len(self.rxbuffer),plen-8,":".join("{:02x}".format(ord(c)) for c in self.rxbuffer))
         while len(self.rxbuffer) >= plen+8:
             coeff = seq-latestseq-1;
-            if random.randint(0,10) == 1:
-                if coeff > 0:
-                    self.remoteweight += 1 # If we got a packet before other connections it means that this stream is faster so its weight can be increased , if it is behind instead it means it is too slow so the weight has to be reduced
-                else:
-                    self.remoteweight -= 1 
-                if self.remoteweight < 1:
-                    for c in connections:
-                        c.remoteweight += 1
-                    self.remoteweight = 1
-            
+            self.wsum += coeff
+            self.wcount += 1
             latestseq = max(latestseq,seq)
             #print (cmd,plen,seq)
             
@@ -153,9 +153,10 @@ class PoorMansBondingProtocol(protocol.Protocol):
                     #print("%s: New weight rcvd: %d,%d"%(str(self),self.remoteweight,self.localweight))
             if cmd == CMD_AUTH_PEER:
                 #sendqueue.append((seq,"",self))
-                if decdata == password:
+                if decdata == self.challenge+password:
                     self.auth = True
                     connections.append(self)
+                    print("%s: Authentication successful"%str(self.transport))
                 else:
                     print("Invalid password: "+password)
             if cmd == CMD_PING:
@@ -164,8 +165,16 @@ class PoorMansBondingProtocol(protocol.Protocol):
             if cmd == CMD_PONG:
                 #sendqueue.append((seq,"",self))
                 self.lastpong = time.time()
+            if cmd == CMD_AUTH_CHALLENGE:
+                print("%s: Received auth challenge"%(str(self.transport)))
+                self.sendPacket(CMD_AUTH_PEER, decdata+password)
             self.rxbuffer = self.rxbuffer[8+plen:]
             if time.time()-self.lastwtime > 2.0:
+                avg = float(self.wsum)/float(self.wcount)
+                
+                self.remoteweight = min(60,max(1,30+avg))
+                self.wcount = 0
+                self.wsum = 0
                 self.sendPacket(CMD_PUSH_WEIGHT, struct.pack(">I",self.remoteweight))
                 self.lastwtime = time.time()
                 #print("%s: New weight: %d,%d"%(str(self),self.remoteweight,self.localweight))
